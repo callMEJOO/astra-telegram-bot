@@ -1,4 +1,4 @@
-import os, time, threading, tempfile, requests, queue, asyncio
+import os, time, threading, requests, queue, asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -15,17 +15,10 @@ LOGIN_PASSWORD = os.getenv("LOGIN_PASSWORD")
 ALLOWED_CHAT_ID = 5169610078
 
 # =======================
-# LOGIN + SESSION ENDPOINTS (موقعك)
+# YOUR SITE ENDPOINTS
 # =======================
-LOGIN_URL = "https://astra.app/auth/callback/credentials"
+LOGIN_URL   = "https://astra.app/auth/callback/credentials"
 SESSION_URL = "https://astra.app/api/session"
-
-# =======================
-# ASTRA / TOPAZ
-# =======================
-PROCESS_URL  = "https://api.topazlabs.com/video/"
-STATUS_URL   = "https://api.topazlabs.com/video/{jobId}"
-DOWNLOAD_URL = "https://api.topazlabs.com/video/{fileId}"
 
 # =======================
 # SETTINGS
@@ -35,61 +28,80 @@ TIMEOUT = 120
 DEBUG = True
 
 # =======================
-# STATE
-# =======================
-job_queue = queue.Queue()
-active_jobs = 0
-
-# =======================
 # TOKEN MANAGER
 # =======================
 class TokenManager:
     def __init__(self, max_uses):
+        self.session = requests.Session()
         self.token = None
         self.uses = 0
         self.max_uses = max_uses
-        self.session = requests.Session()
 
     def login(self):
-        payload = {
-            "email": LOGIN_EMAIL,
-            "password": LOGIN_PASSWORD,
-            "callbackUrl": "/explore",
-        }
+        payload = (
+            f"email={LOGIN_EMAIL}"
+            f"&password={LOGIN_PASSWORD}"
+            f"&callbackUrl=%2Fexplore"
+        )
         r = self.session.post(
             LOGIN_URL,
             data=payload,
             headers={
+                "Content-Type": "application/x-www-form-urlencoded",
                 "User-Agent": "Mozilla/5.0",
                 "Accept": "*/*",
                 "Pragma": "no-cache",
             },
             timeout=TIMEOUT,
+            allow_redirects=True,
         )
         if DEBUG:
             print("🧪 LOGIN STATUS:", r.status_code)
 
     def fetch_token(self):
-        self.login()  # لازم تتعمل حتى لو مفيش response
+        self.login()
+
         r = self.session.get(
             SESSION_URL,
             headers={
                 "User-Agent": "Mozilla/5.0",
-                "Accept": "*/*",
+                "Accept": "application/json",
                 "Pragma": "no-cache",
             },
             timeout=TIMEOUT,
         )
-        if DEBUG:
-            print("🧪 SESSION STATUS:", r.status_code)
-            print(r.text[:1000])
 
-        r.raise_for_status()
-        data = r.json()
-        self.token = data.get("appToken")
-        if not self.token:
-            raise RuntimeError("NO appToken FOUND")
+        print("🧪 SESSION STATUS:", r.status_code)
+        print("🧪 SESSION RAW:", r.text[:1000])
+
+        try:
+            data = r.json()
+        except Exception as e:
+            raise RuntimeError(f"SESSION_JSON_PARSE_ERROR: {e}")
+
+        if not data or not isinstance(data, dict):
+            raise RuntimeError(f"SESSION_JSON_INVALID: {data}")
+
+        print("🧪 SESSION KEYS:", list(data.keys()))
+
+        # حاول في الـ root
+        token = data.get("appToken") or data.get("token")
+
+        # لو متغلف جوه object
+        if not token:
+            for v in data.values():
+                if isinstance(v, dict):
+                    token = v.get("appToken") or v.get("token")
+                    if token:
+                        break
+
+        if not token:
+            raise RuntimeError(f"APP_TOKEN_NOT_FOUND | JSON={data}")
+
+        self.token = token
         self.uses = 0
+        if DEBUG:
+            print("🧪 TOKEN OK:", token[:20], "...")
 
     def get(self):
         if not self.token or self.uses >= self.max_uses:
@@ -100,63 +112,21 @@ class TokenManager:
 token_mgr = TokenManager(TOKEN_MAX_USES)
 
 # =======================
-# HELPERS
-# =======================
-def headers():
-    return {
-        "Authorization": f"Bearer {token_mgr.get()}",
-        "Accept": "*/*",
-        "User-Agent": "Mozilla/5.0",
-    }
-
-# =======================
-# ASTRA
-# =======================
-def create_job():
-    payload = {
-        "source": {"container": "mp4"},
-        "filters": [{"model": "slf-2"}],
-    }
-    r = requests.post(PROCESS_URL, headers=headers(), json=payload, timeout=TIMEOUT)
-    if DEBUG:
-        print("🧪 CREATE JOB:", r.status_code, r.text[:500])
-    r.raise_for_status()
-    return r.json()
-
-# =======================
-# TELEGRAM
+# TELEGRAM HANDLERS
 # =======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ALLOWED_CHAT_ID:
         return
-    await update.message.reply_text("👋 شغال… ابعت أي فيديو للتجربة")
+    await update.message.reply_text("👋 شغال… ابعت أي رسالة للتجربة")
 
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ALLOWED_CHAT_ID:
         return
-
-    job_queue.put(update.effective_chat.id)
-    await update.message.reply_text("🚀 بدأنا… شوف اللوجز")
-
-# =======================
-# WORKER
-# =======================
-def worker(loop, app):
-    while True:
-        chat_id = job_queue.get()
-        try:
-            job = create_job()
-            asyncio.run_coroutine_threadsafe(
-                app.bot.send_message(chat_id, f"✅ Job Created\n{job}"),
-                loop,
-            )
-        except Exception as e:
-            asyncio.run_coroutine_threadsafe(
-                app.bot.send_message(chat_id, f"❌ Error\n{e}"),
-                loop,
-            )
-        finally:
-            job_queue.task_done()
+    try:
+        t = token_mgr.get()
+        await update.message.reply_text(f"✅ TOKEN OK\n{t[:30]}...")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error\n{e}")
 
 # =======================
 # MAIN
@@ -164,10 +134,7 @@ def worker(loop, app):
 async def main_async():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-
-    loop = asyncio.get_running_loop()
-    threading.Thread(target=worker, args=(loop, app), daemon=True).start()
+    app.add_handler(MessageHandler(filters.ALL, handle_any))
 
     await app.initialize()
     await app.start()
