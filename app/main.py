@@ -4,6 +4,7 @@ import threading
 import tempfile
 import requests
 import queue
+import asyncio
 
 from telegram import Update
 from telegram.ext import (
@@ -15,18 +16,18 @@ from telegram.ext import (
 )
 
 # =======================
-# ENV (REQUIRED)
+# ENV
 # =======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ASTRA_TOKEN = os.getenv("ASTRA_ACCESS_TOKEN")
 
 # =======================
-# PRIVATE CHAT ONLY
+# PRIVATE CHAT
 # =======================
 ALLOWED_CHAT_ID = 5169610078
 
 # =======================
-# TOPAZ / ASTRA ENDPOINTS
+# TOPAZ / ASTRA
 # =======================
 PROCESS_URL = "https://api.topazlabs.com/video/"
 STATUS_URL = "https://api.topazlabs.com/video/{jobId}"
@@ -63,20 +64,19 @@ def use_token():
     global token_uses
     token_uses += 1
     if token_uses > TOKEN_MAX_USES:
-        raise RuntimeError("TOKEN_LIMIT_REACHED")
+        raise RuntimeError("TOKEN_LIMIT")
 
-def allow_user(user_id: int) -> bool:
+def allow_user(uid):
     day = int(time.time()) // 86400
-    key = (user_id, day)
+    key = (uid, day)
     user_usage[key] = user_usage.get(key, 0) + 1
     return user_usage[key] <= USER_DAILY_LIMIT
 
 # =======================
-# TOPAZ / ASTRA LOGIC
+# ASTRA
 # =======================
-def create_job(video_path: str):
+def create_job(video_path):
     use_token()
-
     payload = {
         "source": {"container": "mp4"},
         "output": {
@@ -89,80 +89,70 @@ def create_job(video_path: str):
             "dynamicCompressionLevel": "High",
         },
         "filters": [{"model": "slf-2"}],
-        "notifications": {
-            "webhookUrl": "https://astra.app/api/hooks/video-status"
-        },
     }
 
-    response = requests.post(
+    r = requests.post(
         PROCESS_URL,
         headers=headers(),
         json=payload,
         timeout=TIMEOUT,
     )
-    response.raise_for_status()
-    return response.json()
+    r.raise_for_status()
+    return r.json()
 
-def get_status(job_id: str):
-    response = requests.get(
+def get_status(job_id):
+    r = requests.get(
         STATUS_URL.format(jobId=job_id),
         headers=headers(),
         timeout=TIMEOUT,
     )
-    response.raise_for_status()
-    return response.json()
+    r.raise_for_status()
+    return r.json()
 
-def download_result(file_id: str):
-    response = requests.get(
+def download_result(file_id):
+    r = requests.get(
         DOWNLOAD_URL.format(fileId=file_id),
         headers=headers(),
         stream=True,
         timeout=TIMEOUT,
     )
-    response.raise_for_status()
-    return response
+    r.raise_for_status()
+    return r
 
 # =======================
 # WORKER THREAD
 # =======================
-def worker():
+def worker(loop):
     global active_jobs
 
     while True:
-        chat_id, video_path, context = job_queue.get()
+        chat_id, video_path, app = job_queue.get()
         active_jobs += 1
 
         try:
             job = create_job(video_path)
-            job_id = job.get("jobId")
+            job_id = job["jobId"]
 
             while True:
-                status = get_status(job_id)
+                st = get_status(job_id)
+                if st["status"] == "completed":
+                    r = download_result(st["resultFileId"])
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f:
+                        for c in r.iter_content(1024 * 1024):
+                            f.write(c)
 
-                if status.get("status") == "completed":
-                    file_id = status.get("resultFileId")
-                    result = download_result(file_id)
-
-                    with tempfile.NamedTemporaryFile(
-                        delete=False, suffix=".mp4"
-                    ) as f:
-                        for chunk in result.iter_content(1024 * 1024):
-                            f.write(chunk)
-
-                        context.bot.send_video(
-                            chat_id, video=open(f.name, "rb")
+                        asyncio.run_coroutine_threadsafe(
+                            app.bot.send_video(chat_id, video=open(f.name, "rb")),
+                            loop,
                         )
                     break
-
                 time.sleep(POLL_INTERVAL)
 
-        except Exception as e:
-            try:
-                context.bot.send_message(
-                    chat_id, "❌ حصل خطأ أثناء المعالجة"
-                )
-            except Exception:
-                pass
+        except Exception:
+            asyncio.run_coroutine_threadsafe(
+                app.bot.send_message(chat_id, "❌ حصل خطأ أثناء المعالجة"),
+                loop,
+            )
 
         finally:
             active_jobs -= 1
@@ -170,7 +160,7 @@ def worker():
             time.sleep(1)
 
 # =======================
-# TELEGRAM HANDLERS
+# TELEGRAM
 # =======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ALLOWED_CHAT_ID:
@@ -181,33 +171,43 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ALLOWED_CHAT_ID:
         return
 
+    global active_jobs
+
     if active_jobs >= MAX_CONCURRENT:
         await update.message.reply_text("⏳ مستنيين دورك")
         return
 
-    user_id = update.effective_user.id
-    if not allow_user(user_id):
+    uid = update.effective_user.id
+    if not allow_user(uid):
         await update.message.reply_text("🚫 وصلت للحد اليومي")
         return
 
-    video = await update.message.video.get_file()
-    path = f"/tmp/{video.file_id}.mp4"
-    await video.download_to_drive(path)
+    file = await update.message.video.get_file()
+    path = f"/tmp/{file.file_id}.mp4"
+    await file.download_to_drive(path)
 
-    job_queue.put((update.effective_chat.id, path, context))
+    job_queue.put((update.effective_chat.id, path, context.application))
     await update.message.reply_text("📥 استلمت الفيديو")
 
 # =======================
-# MAIN
+# ASYNC MAIN (FIX)
 # =======================
-def main():
+async def main_async():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
 
-    threading.Thread(target=worker, daemon=True).start()
-    app.run_polling()
+    loop = asyncio.get_running_loop()
+    threading.Thread(target=worker, args=(loop,), daemon=True).start()
 
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await asyncio.Event().wait()  # keep alive
+
+# =======================
+# ENTRY
+# =======================
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
