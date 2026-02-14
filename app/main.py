@@ -1,6 +1,13 @@
-import os, asyncio, requests
+import os
+import requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 # =======================
 # ENV
@@ -15,7 +22,7 @@ LOGIN_PASSWORD = os.getenv("LOGIN_PASSWORD")
 ALLOWED_CHAT_ID = 5169610078
 
 # =======================
-# URLS (زي بوستمان)
+# URLS (مطابق لبوستمان)
 # =======================
 LOGIN_URL = "https://astra.app/auth/callback/credentials?"
 SESSION_URL = "https://astra.app/api/session"
@@ -24,14 +31,14 @@ SESSION_URL = "https://astra.app/api/session"
 # TOKEN MANAGER
 # =======================
 class TokenManager:
-    def __init__(self):
+    def __init__(self, max_uses=10):
         self.s = requests.Session()
         self.token = None
         self.uses = 0
-        self.max_uses = 10
+        self.max_uses = max_uses
 
     def fetch_token(self):
-        # ---------- POST (زي بوستمان بالحرف)
+        # POST (زي بوستمان بالحرف)
         body = (
             f"email={LOGIN_EMAIL}"
             f"&password={LOGIN_PASSWORD}"
@@ -42,7 +49,9 @@ class TokenManager:
             LOGIN_URL,
             data=body,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.149 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/80.0.3987.149 Safari/537.36",
                 "Pragma": "no-cache",
                 "Accept": "*/*",
                 "Content-Type": "application/x-www-form-urlencoded",
@@ -51,11 +60,13 @@ class TokenManager:
             timeout=60,
         )
 
-        # ---------- GET (زي بوستمان بالحرف)
+        # GET (زي بوستمان بالحرف)
         r = self.s.get(
             SESSION_URL,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.149 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/80.0.3987.149 Safari/537.36",
                 "Pragma": "no-cache",
                 "Accept": "*/*",
             },
@@ -65,17 +76,15 @@ class TokenManager:
         src = r.text
         print("🧪 SESSION RAW:", src[:500])
 
-        # ---------- PARSE LR زي ما انت عامل
+        # PARSE LR (string) — زي ما انت عامل
         left = 'appToken":"'
         right = '","'
-
         if left not in src:
-            raise RuntimeError("appToken LEFT delimiter not found")
+            raise RuntimeError("appToken delimiter not found")
 
         token = src.split(left, 1)[1].split(right, 1)[0]
-
         if not token:
-            raise RuntimeError("appToken EMPTY")
+            raise RuntimeError("appToken empty")
 
         self.token = token
         self.uses = 0
@@ -87,15 +96,15 @@ class TokenManager:
         self.uses += 1
         return self.token
 
-token_mgr = TokenManager()
+token_mgr = TokenManager(max_uses=10)
 
 # =======================
-# TELEGRAM
+# TELEGRAM HANDLERS
 # =======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ALLOWED_CHAT_ID:
         return
-    await update.message.reply_text("👋 شغال – ابعت أي رسالة")
+    await update.message.reply_text("👋 شغال — ابعت أي رسالة للتجربة")
 
 async def handle_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ALLOWED_CHAT_ID:
@@ -107,17 +116,13 @@ async def handle_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error\n{e}")
 
 # =======================
-# MAIN
+# MAIN (Polling مرة واحدة فقط)
 # =======================
-async def main():
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.ALL, handle_any))
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    await asyncio.Event().wait()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
