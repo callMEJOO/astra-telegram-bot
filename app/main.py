@@ -9,10 +9,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ASTRA_TOKEN = os.getenv("ASTRA_ACCESS_TOKEN")
 
 # =======================
-# TOPAZ / ASTRA ENDPOINTS (FIXED)
+# FIXED CHAT ID (PRIVATE)
 # =======================
-PROCESS_URL = "https://api.topazlabs.com/video/"
-STATUS_URL  = "https://api.topazlabs.com/video/{jobId}"
+ALLOWED_CHAT_ID = 5169610078
+
+# =======================
+# TOPAZ / ASTRA ENDPOINTS
+# =======================
+PROCESS_URL  = "https://api.topazlabs.com/video/"
+STATUS_URL   = "https://api.topazlabs.com/video/{jobId}"
 DOWNLOAD_URL = "https://api.topazlabs.com/video/{fileId}"
 
 # =======================
@@ -60,9 +65,7 @@ def allow_user(uid):
 def create_job(video_path):
     use_token()
     payload = {
-        "source": {
-            "container": "mp4"
-        },
+        "source": {"container": "mp4"},
         "output": {
             "resolution": {"width": 1920, "height": 1080},
             "frameRate": 30,
@@ -73,19 +76,15 @@ def create_job(video_path):
             "dynamicCompressionLevel": "High"
         },
         "filters": [{"model": "slf-2"}],
-        "notifications": {
-            "webhookUrl": "https://astra.app/api/hooks/video-status"
-        }
+        "notifications": {"webhookUrl": "https://astra.app/api/hooks/video-status"}
     }
 
-    with open(video_path, "rb") as f:
-        r = requests.post(
-            PROCESS_URL,
-            headers=headers(),
-            json=payload,
-            timeout=TIMEOUT
-        )
-
+    r = requests.post(
+        PROCESS_URL,
+        headers=headers(),
+        json=payload,
+        timeout=TIMEOUT
+    )
     r.raise_for_status()
     return r.json()
 
@@ -148,9 +147,14 @@ def worker():
 # TELEGRAM
 # =======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        return
     await update.message.reply_text("👋 ابعت الفيديو")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        return
+
     global active
     uid = update.effective_user.id
 
