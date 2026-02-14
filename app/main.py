@@ -17,8 +17,8 @@ ALLOWED_CHAT_ID = 5169610078
 # =======================
 # URLS (زي بوستمان)
 # =======================
-LOGIN_URL = "https://mysite.app/auth/callback/credentials?"
-SESSION_URL = "https://mysite.app/api/session"
+LOGIN_URL = "https://astra.app/auth/callback/credentials?"
+SESSION_URL = "https://astra.app/api/session"
 
 # =======================
 # TOKEN MANAGER
